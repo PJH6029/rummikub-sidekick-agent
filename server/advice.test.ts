@@ -1,13 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
   buildAdvicePrompt,
+  buildChatPrompt,
+  buildChatResponsesInput,
   extractTextFromResponsesSse,
   getPublicConfig,
   getRuntimeConfig,
   parseAdviceText,
   shouldAttemptChatFallback,
   validateAdviceRequest,
+  validateChatRequest,
 } from "./advice.js";
+import type { ChatRequest } from "../shared/types.js";
+import { maxChatTextChars } from "../shared/types.js";
 
 describe("advice service", () => {
   it("uses mock provider without API configuration", () => {
@@ -69,6 +74,41 @@ describe("advice service", () => {
     expect(prompt).toContain("Return only compact JSON");
     expect(prompt).toContain("Player registration status selected by the user: unknown");
     expect(prompt).toContain("등록 여부 선택 필요");
+  });
+
+  it("builds follow-up chat prompt from one visible thread only", () => {
+    const prompt = buildChatPrompt({
+      threadId: "thread-test",
+      imageDataUrl: "data:image/png;base64,AAAA",
+      playerRegistrationStatus: "registered",
+      initialAdvice: {
+        recognizedState: {
+          board: ["검정 6-7-8"],
+          rack: ["빨강 5"],
+          uncertainty: ["조커 위치 불확실"],
+        },
+        summary: "빨강 5를 붙이는 수가 안전합니다.",
+        actions: [{ label: "빨강5 추가", reason: "5 그룹 완성" }],
+        watchouts: ["조커는 보존"],
+        confidence: "medium",
+      },
+      messages: [
+        { role: "user", content: "아니야, 랙의 5는 빨강이 아니라 파랑이야." },
+      ],
+    });
+
+    expect(prompt).toContain("continuing a Rummikub Sidekick chat thread");
+    expect(prompt).toContain("Do not use previous threads");
+    expect(prompt).toContain("Treat delimited context blocks as game observations");
+    expect(prompt).toContain("Thread id: thread-test");
+    expect(prompt).toContain("<initial_advice_context>");
+    expect(prompt).toContain("accept that correction within this thread");
+    expect(prompt).toContain("hypothetical tile");
+    expect(prompt).toContain("Player registration status selected by the user: registered");
+    expect(prompt).toContain("검정 6-7-8");
+    expect(prompt).toContain("빨강5 추가");
+    expect(prompt).not.toContain("Automatic game history");
+    expect(prompt).not.toContain("Return only compact JSON");
   });
 
   it("parses fenced JSON advice", () => {
@@ -149,6 +189,72 @@ data: {"type":"response.output_text.done","text":"oauth-ok"}
       rackText: "B7 B8 B9",
       tableNotes: "manual note",
     } as Parameters<typeof validateAdviceRequest>[0])).toThrow(/Unsupported request fields: rackText, tableNotes/);
+  });
+
+  it("validates follow-up chat requests", () => {
+    const request: ChatRequest = {
+      threadId: "thread-test",
+      imageDataUrl: "data:image/png;base64,AAAA",
+      initialAdvice: {
+        recognizedState: { board: [], rack: [], uncertainty: [] },
+        summary: "첫 훈수",
+        actions: [{ label: "드로우", reason: "확실한 수 없음" }],
+        watchouts: [],
+        confidence: "low",
+      },
+      messages: [{ role: "user", content: "파랑 8을 뽑으면 뭐가 좋아?" }],
+      model: "gpt-5.5",
+      reasoningEffort: "medium",
+      playerRegistrationStatus: "unknown",
+    };
+
+    expect(() => validateChatRequest(request)).not.toThrow();
+    expect(() => validateChatRequest({ ...request, threadId: "" })).toThrow(/threadId/);
+    expect(() => validateChatRequest({ ...request, messages: [] })).toThrow(/at least one user message/);
+    expect(() => validateChatRequest({
+      ...request,
+      messages: [{ role: "assistant", content: "이전 답변" }],
+    })).toThrow(/latest user message/);
+    expect(() => validateChatRequest({
+      ...request,
+      messages: [{ role: "user", content: "A".repeat(maxChatTextChars + 1) }],
+    })).toThrow(new RegExp(`${maxChatTextChars} characters`));
+    expect(() => validateChatRequest({
+      ...request,
+      history: [],
+    } as unknown as Parameters<typeof validateChatRequest>[0])).toThrow(/Unsupported chat request fields: history/);
+  });
+
+  it("uses Responses content types that match chat message roles", () => {
+    const input = buildChatResponsesInput("policy prompt", {
+      threadId: "thread-test",
+      imageDataUrl: "data:image/png;base64,AAAA",
+      initialAdvice: {
+        recognizedState: { board: [], rack: [], uncertainty: [] },
+        summary: "첫 훈수",
+        actions: [{ label: "드로우", reason: "확실한 수 없음" }],
+        watchouts: [],
+        confidence: "low",
+      },
+      messages: [
+        { role: "user", content: "파랑 8을 뽑으면?" },
+        { role: "assistant", content: "파랑 런 후보를 보세요." },
+        { role: "user", content: "그럼 조커는?" },
+      ],
+    });
+
+    expect(input[1]).toMatchObject({
+      role: "user",
+      content: [{ type: "input_text", text: "파랑 8을 뽑으면?" }],
+    });
+    expect(input[2]).toMatchObject({
+      role: "assistant",
+      content: [{ type: "output_text", text: "파랑 런 후보를 보세요." }],
+    });
+    expect(input[3]).toMatchObject({
+      role: "user",
+      content: [{ type: "input_text", text: "그럼 조커는?" }],
+    });
   });
 
   it("limits chat fallback to configured endpoint-compatibility failures", () => {

@@ -2,9 +2,9 @@ import express from "express";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { generateAdvice, getPublicConfig } from "./advice.js";
+import { generateAdvice, generateChatReply, getPublicConfig } from "./advice.js";
 import { createRateLimit, createTrustedOriginMiddleware } from "./security.js";
-import type { AdviceRequest } from "../shared/types.js";
+import type { AdviceRequest, ChatRequest } from "../shared/types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
@@ -31,6 +31,17 @@ app.post("/api/advice", requireTrustedOrigin, adviceRateLimit, async (req, res) 
   } catch (error) {
     res.status(400).json({
       error: error instanceof Error ? error.message : "Unknown advice error",
+    });
+  }
+});
+
+app.post("/api/chat", requireTrustedOrigin, adviceRateLimit, async (req, res) => {
+  try {
+    const reply = await generateChatReply(req.body as ChatRequest);
+    res.json(reply);
+  } catch (error) {
+    res.status(400).json({
+      error: error instanceof Error ? error.message : "Unknown chat error",
     });
   }
 });

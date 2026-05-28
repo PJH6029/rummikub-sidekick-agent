@@ -1,5 +1,8 @@
 import type {
+  AdviceContext,
   AdviceResponse,
+  ChatMessage,
+  ChatResponse,
   PlayerRegistrationStatus,
   PublicConfig,
   ReasoningEffort,
@@ -32,4 +35,27 @@ export async function requestAdvice(payload: {
   }
 
   return response.json() as Promise<AdviceResponse>;
+}
+
+export async function requestChat(payload: {
+  threadId: string;
+  imageDataUrl: string;
+  initialAdvice: AdviceContext;
+  messages: ChatMessage[];
+  model: SupportedModel;
+  reasoningEffort: ReasoningEffort;
+  playerRegistrationStatus: PlayerRegistrationStatus;
+}): Promise<ChatResponse> {
+  const response = await fetch("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const body = (await response.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error || "Chat request failed.");
+  }
+
+  return response.json() as Promise<ChatResponse>;
 }

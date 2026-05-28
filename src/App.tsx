@@ -1,16 +1,20 @@
 import {
   Bot,
+  ChevronRight,
   Gamepad2,
   Loader2,
+  MessageCircle,
   RefreshCw,
   Send,
+  User,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
-import { fetchConfig, requestAdvice } from "./api";
+import { type FormEvent, useEffect, useRef, useState } from "react";
+import { fetchConfig, requestAdvice, requestChat } from "./api";
 import { captureScreenFrame } from "./capture";
 import {
   playerRegistrationStatuses,
   reasoningEfforts,
+  maxChatTextChars,
   supportedModels,
   type AdviceResponse,
   type PlayerRegistrationStatus,
@@ -18,6 +22,13 @@ import {
   type ReasoningEffort,
   type SupportedModel,
 } from "../shared/types";
+import {
+  appendThreadMessage,
+  buildThreadChatPayload,
+  prependThread,
+  type AdviceThread,
+  type ThreadMessage,
+} from "./threading";
 
 const rummikubGameUrl = "https://rummikub-apps.com/?cb=37";
 const defaultModel: SupportedModel = "gpt-5.5";
@@ -51,15 +62,17 @@ const defaultAdvice: AdviceResponse = {
 export default function App() {
   const gameCaptureRef = useRef<HTMLDivElement>(null);
   const [gameVersion, setGameVersion] = useState(0);
-  const [advice, setAdvice] = useState<AdviceResponse>(defaultAdvice);
+  const [threads, setThreads] = useState<AdviceThread[]>([]);
+  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [config, setConfig] = useState<PublicConfig | null>(null);
   const [selectedModel, setSelectedModel] = useState<SupportedModel>(defaultModel);
   const [selectedReasoningEffort, setSelectedReasoningEffort] = useState<ReasoningEffort>(defaultReasoningEffort);
   const [playerRegistrationStatus, setPlayerRegistrationStatus] = useState<PlayerRegistrationStatus>(
     getInitialRegistrationStatus,
   );
-  const [screenshot, setScreenshot] = useState<string | null>(null);
+  const [chatDraft, setChatDraft] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [chatLoadingThreadId, setChatLoadingThreadId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -85,6 +98,14 @@ export default function App() {
   const availableModels = config?.availableModels ?? [...supportedModels];
   const availableReasoningEfforts = config?.availableReasoningEfforts ?? [...reasoningEfforts];
   const providerLabel = `${selectedModel} / ${selectedReasoningEffort}`;
+  const activeThread = threads.find((thread) => thread.id === activeThreadId) ?? null;
+  const inactiveThreads = threads.filter((thread) => thread.id !== activeThreadId);
+  const displayedAdvice = activeThread?.advice ?? defaultAdvice;
+  const displayedScreenshot = activeThread?.screenshot ?? null;
+
+  useEffect(() => {
+    setChatDraft("");
+  }, [activeThreadId]);
 
   async function handleAdviceRequest() {
     setIsLoading(true);
@@ -95,18 +116,68 @@ export default function App() {
         element: gameCaptureRef.current,
       });
 
-      setScreenshot(capture.imageDataUrl);
       const nextAdvice = await requestAdvice({
         imageDataUrl: capture.imageDataUrl,
         model: selectedModel,
         reasoningEffort: selectedReasoningEffort,
         playerRegistrationStatus,
       });
-      setAdvice(nextAdvice);
+      const nextThread: AdviceThread = {
+        id: createId("thread"),
+        createdAt: Date.now(),
+        screenshot: capture.imageDataUrl,
+        advice: nextAdvice,
+        messages: [],
+        model: selectedModel,
+        reasoningEffort: selectedReasoningEffort,
+        registrationStatus: playerRegistrationStatus,
+      };
+      setThreads((currentThreads) => prependThread(currentThreads, nextThread));
+      setActiveThreadId(nextThread.id);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "조언 요청에 실패했습니다.");
     } finally {
       setIsLoading(false);
+    }
+  }
+
+  async function handleChatSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const content = chatDraft.trim();
+    if (!content || !activeThread || chatLoadingThreadId) {
+      return;
+    }
+    if (content.length > maxChatTextChars) {
+      setError(`채팅 질문은 ${maxChatTextChars.toLocaleString("ko-KR")}자 이하로 입력해 주세요.`);
+      return;
+    }
+
+    const userMessage: ThreadMessage = {
+      id: createId("message"),
+      role: "user",
+      content,
+      createdAt: Date.now(),
+    };
+    const messagesForRequest = [...activeThread.messages, userMessage];
+
+    setError(null);
+    setChatDraft("");
+    setThreads((currentThreads) => appendThreadMessage(currentThreads, activeThread.id, userMessage));
+    setChatLoadingThreadId(activeThread.id);
+
+    try {
+      const reply = await requestChat(buildThreadChatPayload(activeThread, messagesForRequest));
+      const assistantMessage: ThreadMessage = {
+        id: createId("message"),
+        role: "assistant",
+        content: reply.message.content,
+        createdAt: Date.now(),
+      };
+      setThreads((currentThreads) => appendThreadMessage(currentThreads, activeThread.id, assistantMessage));
+    } catch (chatError) {
+      setError(chatError instanceof Error ? chatError.message : "채팅 응답 요청에 실패했습니다.");
+    } finally {
+      setChatLoadingThreadId((currentThreadId) => currentThreadId === activeThread.id ? null : currentThreadId);
     }
   }
 
@@ -198,44 +269,43 @@ export default function App() {
         </div>
 
         <aside className="advice-panel">
-          <div className="bubble">
-            <div className="bubble-avatar">
-              <Bot size={22} aria-hidden="true" />
-            </div>
-            <div className="bubble-body">
-              <div className="bubble-meta">
-                <span>RESPONSES</span>
-              </div>
-              <RecognizedStateView state={advice.recognizedState} />
-              <p className="summary">{advice.summary}</p>
-              <div className="action-list">
-                {advice.actions.map((action) => (
-                  <div className="action-item" key={`${action.label}-${action.reason}`}>
-                    <strong>{action.label}</strong>
-                    <span>{action.reason}</span>
-                  </div>
-                ))}
-              </div>
-              <div className="watchouts">
-                {advice.watchouts.map((watchout) => (
-                  <span key={watchout}>{watchout}</span>
-                ))}
-              </div>
-            </div>
-          </div>
+          {inactiveThreads.length > 0 ? (
+            <ThreadArchive
+              activeThreadId={activeThreadId}
+              onSelectThread={setActiveThreadId}
+              threads={inactiveThreads}
+            />
+          ) : null}
+
+          <AdviceBubble advice={displayedAdvice} />
+
+          {activeThread ? (
+            <ThreadChat
+              draft={chatDraft}
+              isLoading={chatLoadingThreadId === activeThread.id}
+              messages={activeThread.messages}
+              onDraftChange={setChatDraft}
+              onSubmit={handleChatSubmit}
+              thread={activeThread}
+            />
+          ) : null}
 
           {error ? <div className="error-box">{error}</div> : null}
 
-          {screenshot ? (
+          {displayedScreenshot ? (
             <div className="screenshot-card">
-              <span>Last capture</span>
-              <img src={screenshot} alt="Last captured Rummikub screen" />
+              <span>Thread capture</span>
+              <img src={displayedScreenshot} alt="Captured Rummikub screen for the active thread" />
             </div>
           ) : null}
         </aside>
       </section>
     </main>
   );
+}
+
+function createId(prefix: string): string {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function getInitialRegistrationStatus(): PlayerRegistrationStatus {
@@ -261,6 +331,144 @@ function updateRegistrationStatus(
 
 function isPlayerRegistrationStatus(value: unknown): value is PlayerRegistrationStatus {
   return typeof value === "string" && (playerRegistrationStatuses as readonly string[]).includes(value);
+}
+
+function ThreadArchive({
+  activeThreadId,
+  onSelectThread,
+  threads,
+}: {
+  activeThreadId: string | null;
+  onSelectThread: (threadId: string) => void;
+  threads: AdviceThread[];
+}) {
+  return (
+    <div className="thread-archive" aria-label="previous advice threads">
+      <div className="thread-archive-header">
+        <MessageCircle size={15} aria-hidden="true" />
+        <span>이전 스레드</span>
+      </div>
+      <div className="thread-list">
+        {threads.map((thread) => (
+          <button
+            aria-pressed={activeThreadId === thread.id}
+            className="thread-summary"
+            key={thread.id}
+            onClick={() => onSelectThread(thread.id)}
+            type="button"
+          >
+            <span>{formatThreadTime(thread.createdAt)}</span>
+            <strong>{thread.advice.summary}</strong>
+            <small>{formatThreadMeta(thread)}</small>
+            <ChevronRight size={15} aria-hidden="true" />
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AdviceBubble({ advice }: { advice: AdviceResponse }) {
+  return (
+    <div className="bubble">
+      <div className="bubble-avatar">
+        <Bot size={22} aria-hidden="true" />
+      </div>
+      <div className="bubble-body">
+        <div className="bubble-meta">
+          <span>RESPONSES</span>
+        </div>
+        <RecognizedStateView state={advice.recognizedState} />
+        <p className="summary">{advice.summary}</p>
+        <div className="action-list">
+          {advice.actions.map((action) => (
+            <div className="action-item" key={`${action.label}-${action.reason}`}>
+              <strong>{action.label}</strong>
+              <span>{action.reason}</span>
+            </div>
+          ))}
+        </div>
+        <div className="watchouts">
+          {advice.watchouts.map((watchout) => (
+            <span key={watchout}>{watchout}</span>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ThreadChat({
+  draft,
+  isLoading,
+  messages,
+  onDraftChange,
+  onSubmit,
+  thread,
+}: {
+  draft: string;
+  isLoading: boolean;
+  messages: ThreadMessage[];
+  onDraftChange: (value: string) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  thread: AdviceThread;
+}) {
+  return (
+    <div className="thread-chat">
+      <div className="thread-context">
+        <span>{formatThreadMeta(thread)}</span>
+      </div>
+      {messages.length > 0 ? (
+        <div className="chat-log" aria-label="thread chat log">
+          {messages.map((message) => (
+            <ChatMessageBubble key={message.id} message={message} />
+          ))}
+          {isLoading ? (
+            <div className="chat-message assistant pending">
+              <Bot size={16} aria-hidden="true" />
+              <span>답변 생성 중...</span>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      <form className="chat-form" onSubmit={onSubmit}>
+        <textarea
+          aria-label="follow-up question"
+          disabled={isLoading}
+          maxLength={maxChatTextChars}
+          onChange={(event) => onDraftChange(event.target.value)}
+          placeholder="보드/랙 교정, 새로 뽑은 카드 가정, 조커 활용 질문을 이어서 물어보세요."
+          rows={3}
+          value={draft}
+        />
+        <button disabled={isLoading || draft.trim().length === 0} type="submit">
+          {isLoading ? <Loader2 className="spin" size={17} aria-hidden="true" /> : <Send size={17} aria-hidden="true" />}
+          보내기
+        </button>
+      </form>
+    </div>
+  );
+}
+
+function ChatMessageBubble({ message }: { message: ThreadMessage }) {
+  const isUser = message.role === "user";
+  return (
+    <div className={`chat-message ${isUser ? "user" : "assistant"}`}>
+      {isUser ? <User size={16} aria-hidden="true" /> : <Bot size={16} aria-hidden="true" />}
+      <p>{message.content}</p>
+    </div>
+  );
+}
+
+function formatThreadTime(timestamp: number): string {
+  return new Intl.DateTimeFormat("ko-KR", {
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(timestamp);
+}
+
+function formatThreadMeta(thread: AdviceThread): string {
+  return `${thread.model} / ${thread.reasoningEffort} / ${registrationStatusLabels[thread.registrationStatus]}`;
 }
 
 function RecognizedStateView({ state }: { state: AdviceResponse["recognizedState"] }) {
