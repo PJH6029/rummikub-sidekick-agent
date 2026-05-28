@@ -1,4 +1,10 @@
-import type { AdviceHistoryEntry, AdviceResponse, PublicConfig, ReasoningEffort, SupportedModel } from "../shared/types";
+import type {
+  AdviceResponse,
+  PlayerRegistrationStatus,
+  PublicConfig,
+  ReasoningEffort,
+  SupportedModel,
+} from "../shared/types";
 
 export async function fetchConfig(): Promise<PublicConfig> {
   const response = await fetch("/api/config");
@@ -10,9 +16,9 @@ export async function fetchConfig(): Promise<PublicConfig> {
 
 export async function requestAdvice(payload: {
   imageDataUrl: string;
-  history: AdviceHistoryEntry[];
   model: SupportedModel;
   reasoningEffort: ReasoningEffort;
+  playerRegistrationStatus: PlayerRegistrationStatus;
 }): Promise<AdviceResponse> {
   const response = await fetch("/api/advice", {
     method: "POST",

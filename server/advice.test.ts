@@ -47,34 +47,28 @@ describe("advice service", () => {
     expect(() => getRuntimeConfig({ RUMMIKUB_MODEL: "gpt-4.1-mini" })).toThrow(/Unsupported model/);
   });
 
-  it("builds prompt from rules, screen screenshot, and automatic history only", () => {
+  it("builds prompt from rules, screen screenshot, and registration status only", () => {
     const prompt = buildAdvicePrompt({
       imageDataUrl: "data:image/png;base64,abc",
-      history: [
-        {
-          recognizedState: {
-            board: ["이전 보드: 파랑 3-4-5"],
-            rack: ["이전 랙: 빨강 8, 빨강 9"],
-            uncertainty: ["이전 턴의 일부 타일이 흐림"],
-          },
-          summary: "이전에는 드로우가 안전했습니다.",
-          actions: [{ label: "드로우", reason: "확실한 조합이 없었습니다." }],
-          confidence: "low",
-        },
-      ],
+      playerRegistrationStatus: "unknown",
       rackText: "B7 B8 B9 R10 Y10 K10",
       tableNotes: "manual note should be ignored",
     } as Parameters<typeof buildAdvicePrompt>[0]);
     expect(prompt).toContain("Rummikub rules");
-    expect(prompt).toContain("Automatic game history");
+    expect(prompt).toContain("user-selected registration status");
     expect(prompt).toContain("Capture source: browser screen screenshot");
-    expect(prompt).toContain("이전 보드: 파랑 3-4-5");
+    expect(prompt).toContain("Read the visible board and rack from the current screenshot from scratch every time.");
+    expect(prompt).toContain("Do not carry over rack tiles");
     expect(prompt).not.toContain("B7 B8 B9");
     expect(prompt).not.toContain("manual note should be ignored");
     expect(prompt).not.toContain("User rack notes");
     expect(prompt).not.toContain("Table notes");
+    expect(prompt).not.toContain("Automatic game history");
+    expect(prompt).not.toContain("이전 보드");
     expect(prompt).toContain("recognizedState");
     expect(prompt).toContain("Return only compact JSON");
+    expect(prompt).toContain("Player registration status selected by the user: unknown");
+    expect(prompt).toContain("등록 여부 선택 필요");
   });
 
   it("parses fenced JSON advice", () => {
@@ -109,20 +103,6 @@ data: {"type":"response.output_text.done","text":"oauth-ok"}
       .toThrow(/5 MB/);
   });
 
-  it("validates request metadata bounds", () => {
-    expect(() => validateAdviceRequest({
-      imageDataUrl: "data:image/png;base64,AAAA",
-      history: [
-        {
-          recognizedState: { board: [], rack: [], uncertainty: [] },
-          summary: "A".repeat(501),
-          actions: [],
-          confidence: "medium",
-        },
-      ],
-    })).toThrow(/summary/);
-  });
-
   it("accepts supported request model controls only", () => {
     expect(() => validateAdviceRequest({
       imageDataUrl: "data:image/png;base64,AAAA",
@@ -141,7 +121,24 @@ data: {"type":"response.output_text.done","text":"oauth-ok"}
     } as unknown as Parameters<typeof validateAdviceRequest>[0])).toThrow(/reasoningEffort must be one of/);
   });
 
+  it("accepts supported player registration status only", () => {
+    expect(() => validateAdviceRequest({
+      imageDataUrl: "data:image/png;base64,AAAA",
+      playerRegistrationStatus: "registered",
+    })).not.toThrow();
+
+    expect(() => validateAdviceRequest({
+      imageDataUrl: "data:image/png;base64,AAAA",
+      playerRegistrationStatus: "opened",
+    } as unknown as Parameters<typeof validateAdviceRequest>[0])).toThrow(/playerRegistrationStatus must be one of/);
+  });
+
   it("rejects legacy request fields", () => {
+    expect(() => validateAdviceRequest({
+      imageDataUrl: "data:image/png;base64,AAAA",
+      history: [],
+    } as unknown as Parameters<typeof validateAdviceRequest>[0])).toThrow(/Unsupported request fields: history/);
+
     expect(() => validateAdviceRequest({
       imageDataUrl: "data:image/png;base64,AAAA",
       captureMode: "board",

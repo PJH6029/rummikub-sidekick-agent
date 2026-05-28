@@ -5,9 +5,11 @@ export type AdviceAction = {
 
 export const supportedModels = ["gpt-5.4", "gpt-5.5"] as const;
 export const reasoningEfforts = ["none", "low", "medium", "high", "xhigh"] as const;
+export const playerRegistrationStatuses = ["unknown", "unregistered", "registered"] as const;
 
 export type SupportedModel = (typeof supportedModels)[number];
 export type ReasoningEffort = (typeof reasoningEfforts)[number];
+export type PlayerRegistrationStatus = (typeof playerRegistrationStatuses)[number];
 
 export type RecognizedState = {
   board: string[];
@@ -26,18 +28,11 @@ export type AdviceResponse = {
   rawText?: string;
 };
 
-export type AdviceHistoryEntry = {
-  recognizedState: RecognizedState;
-  summary: string;
-  actions: AdviceAction[];
-  confidence: "low" | "medium" | "high";
-};
-
 export type AdviceRequest = {
   imageDataUrl: string;
-  history?: AdviceHistoryEntry[];
   model?: SupportedModel;
   reasoningEffort?: ReasoningEffort;
+  playerRegistrationStatus?: PlayerRegistrationStatus;
 };
 
 export type PublicConfig = {

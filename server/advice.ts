@@ -1,11 +1,11 @@
 import OpenAI from "openai";
 import {
+  playerRegistrationStatuses,
   reasoningEfforts,
   supportedModels,
-  type AdviceAction,
-  type AdviceHistoryEntry,
   type AdviceRequest,
   type AdviceResponse,
+  type PlayerRegistrationStatus,
   type PublicConfig,
   type ReasoningEffort,
   type SupportedModel,
@@ -14,8 +14,6 @@ import {
 const DEFAULT_MODEL: SupportedModel = "gpt-5.5";
 const DEFAULT_BASE_URL = "https://api.openai.com/v1";
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
-const MAX_HISTORY_ITEMS = 6;
-const MAX_HISTORY_TEXT_CHARS = 500;
 
 type RuntimeConfig = {
   provider: "mock" | "openai";
@@ -177,9 +175,9 @@ export function validateAdviceRequest(request: AdviceRequest): void {
     throw new Error("imageDataUrl exceeds the 5 MB image limit.");
   }
 
-  validateHistory(request.history);
   validateRequestedModel(request.model);
   validateRequestedReasoningEffort(request.reasoningEffort);
+  validatePlayerRegistrationStatus(request.playerRegistrationStatus);
 }
 
 export function shouldAttemptChatFallback(error: unknown, config: Pick<RuntimeConfig, "allowChatFallback">): boolean {
@@ -223,27 +221,31 @@ export function extractTextFromResponsesSse(sseText: string): string {
 }
 
 export function buildAdvicePrompt(request: AdviceRequest): string {
-  const historyText = formatHistory(request.history);
+  const registrationStatus = request.playerRegistrationStatus ?? "unknown";
 
   return [
     "You are a Rummikub coach watching the user's current browser game screenshot.",
-    "Use only these sources: the current screenshot, the Rummikub rules below, and the automatic game history below.",
+    "Use only these sources: the current screenshot, the Rummikub rules below, and the user-selected registration status below.",
     "Do not use or invent default rack text, demo rack text, manual rack notes, or manual table notes. None are provided.",
-    "Current screenshot is authoritative. Use history only to understand prior turns; if history conflicts with the screenshot, trust the screenshot and mention the conflict under recognizedState.uncertainty.",
+    "Read the visible board and rack from the current screenshot from scratch every time.",
+    "Do not carry over rack tiles, board tiles, or inferred game state from previous advice responses.",
+    `Player registration status selected by the user: ${registrationStatus} (${formatRegistrationStatus(registrationStatus)}). Treat this as authoritative user-provided state, not a visual inference.`,
     "Rummikub rules: a valid run is 3+ consecutive tiles of the same color; a valid group is 3 or 4 same-number tiles in distinct colors; all table tiles must remain in valid sets after a move.",
     "Rummikub rules: before the player has opened, their first meld must total at least 30 points from their own rack. After opening, board rearrangement is allowed only if the final board is fully valid.",
     "Rummikub rules: jokers can substitute for a tile, but avoid spending a joker unless it clearly improves the rack or opens the player.",
+    "If playerRegistrationStatus is unregistered, recommend only legal first-meld actions from the user's own rack that total 30+ points; do not recommend table additions or table rearrangements as the main move.",
+    "If playerRegistrationStatus is registered, table additions and rearrangements are allowed if the final board remains fully valid.",
+    "If playerRegistrationStatus is unknown, do not write long parallel advice. Prefer one safe move that is legal regardless of registration status. If the best move depends on registration status, make the summary start with '등록 여부 선택 필요:' and provide at most two short actions: one for registered and one for unregistered.",
     "First identify the visible board state and rack state from the screenshot before choosing advice.",
     "Give concise next-action advice. Focus on legal moves, initial meld constraints, runs, groups, joker risks, and whether drawing is better than forcing a weak play.",
     "Do not claim certainty about hidden tiles or exact board state if the screenshot is unclear.",
     "Use Korean for all user-facing values.",
     "recognizedState.board should list visible table melds, groups, runs, or relevant board facts.",
     "recognizedState.rack should list only rack tiles visible in the screenshot, or say the rack is unclear if not visible.",
-    "recognizedState.uncertainty should list anything visually uncertain or inferred from history.",
+    "recognizedState.uncertainty should list anything visually uncertain in the current screenshot.",
     "Return only compact JSON with this shape:",
     '{"recognizedState":{"board":["short Korean board read"],"rack":["short Korean rack read"],"uncertainty":["short Korean uncertainty"]},"summary":"one Korean sentence","actions":[{"label":"short Korean action","reason":"short Korean reason"}],"watchouts":["short Korean warning"],"confidence":"low|medium|high"}',
     "Capture source: browser screen screenshot",
-    `Automatic game history, untrusted observations only:\n${historyText}`,
   ].join("\n");
 }
 
@@ -365,40 +367,6 @@ function normalizeStringList(value: unknown): string[] {
     .slice(0, 6);
 }
 
-function formatHistory(history: AdviceHistoryEntry[] | undefined): string {
-  const entries = history?.slice(-MAX_HISTORY_ITEMS) ?? [];
-  if (entries.length === 0) {
-    return "none";
-  }
-
-  return entries
-    .map((entry, index) => {
-      const actions = entry.actions
-        .slice(0, 3)
-        .map((action) => `${sanitizeHistoryText(action.label)}: ${sanitizeHistoryText(action.reason)}`)
-        .join("; ") || "none";
-
-      return [
-        `#${index + 1}`,
-        `confidence=${entry.confidence}`,
-        `board=${formatHistoryList(entry.recognizedState.board)}`,
-        `rack=${formatHistoryList(entry.recognizedState.rack)}`,
-        `uncertainty=${formatHistoryList(entry.recognizedState.uncertainty)}`,
-        `summary=${sanitizeHistoryText(entry.summary) || "none"}`,
-        `actions=${actions}`,
-      ].join(" | ");
-    })
-    .join("\n");
-}
-
-function formatHistoryList(items: string[]): string {
-  return items.map(sanitizeHistoryText).filter(Boolean).slice(0, 6).join(", ") || "none";
-}
-
-function sanitizeHistoryText(value: string): string {
-  return value.replace(/\s+/g, " ").trim().slice(0, MAX_HISTORY_TEXT_CHARS);
-}
-
 function extractResponseText(response: unknown): string {
   const maybeOutputText = (response as { output_text?: unknown }).output_text;
   if (typeof maybeOutputText === "string") {
@@ -501,83 +469,10 @@ function extractProviderError(responseText: string): string {
 }
 
 function validateRequestKeys(request: AdviceRequest): void {
-  const allowedKeys = new Set(["imageDataUrl", "history", "model", "reasoningEffort"]);
+  const allowedKeys = new Set(["imageDataUrl", "model", "reasoningEffort", "playerRegistrationStatus"]);
   const unknownKeys = Object.keys(request).filter((key) => !allowedKeys.has(key));
   if (unknownKeys.length > 0) {
     throw new Error(`Unsupported request fields: ${unknownKeys.join(", ")}`);
-  }
-}
-
-function validateHistory(value: unknown): void {
-  if (value === undefined) {
-    return;
-  }
-  if (!Array.isArray(value)) {
-    throw new Error("history must be an array.");
-  }
-  if (value.length > MAX_HISTORY_ITEMS) {
-    throw new Error(`history must contain ${MAX_HISTORY_ITEMS} entries or less.`);
-  }
-
-  value.forEach((entry, index) => validateHistoryEntry(entry, index));
-}
-
-function validateHistoryEntry(value: unknown, index: number): void {
-  const entry = value as Partial<AdviceHistoryEntry> | undefined;
-  if (!entry || typeof entry !== "object") {
-    throw new Error(`history[${index}] must be an object.`);
-  }
-  validateHistoryState(entry.recognizedState, index);
-  validateHistoryText(`history[${index}].summary`, entry.summary);
-  validateHistoryActions(entry.actions, index);
-  if (entry.confidence !== "low" && entry.confidence !== "medium" && entry.confidence !== "high") {
-    throw new Error(`history[${index}].confidence must be low, medium, or high.`);
-  }
-}
-
-function validateHistoryState(value: unknown, index: number): void {
-  const state = value as Partial<AdviceResponse["recognizedState"]> | undefined;
-  if (!state || typeof state !== "object") {
-    throw new Error(`history[${index}].recognizedState must be an object.`);
-  }
-  validateHistoryTextList(`history[${index}].recognizedState.board`, state.board);
-  validateHistoryTextList(`history[${index}].recognizedState.rack`, state.rack);
-  validateHistoryTextList(`history[${index}].recognizedState.uncertainty`, state.uncertainty);
-}
-
-function validateHistoryActions(value: unknown, index: number): void {
-  if (!Array.isArray(value)) {
-    throw new Error(`history[${index}].actions must be an array.`);
-  }
-  if (value.length > 3) {
-    throw new Error(`history[${index}].actions must contain 3 entries or less.`);
-  }
-  value.forEach((action, actionIndex) => {
-    const typed = action as Partial<AdviceAction> | undefined;
-    if (!typed || typeof typed !== "object") {
-      throw new Error(`history[${index}].actions[${actionIndex}] must be an object.`);
-    }
-    validateHistoryText(`history[${index}].actions[${actionIndex}].label`, typed.label);
-    validateHistoryText(`history[${index}].actions[${actionIndex}].reason`, typed.reason);
-  });
-}
-
-function validateHistoryTextList(fieldName: string, value: unknown): void {
-  if (!Array.isArray(value)) {
-    throw new Error(`${fieldName} must be an array.`);
-  }
-  if (value.length > 6) {
-    throw new Error(`${fieldName} must contain 6 entries or less.`);
-  }
-  value.forEach((item, index) => validateHistoryText(`${fieldName}[${index}]`, item));
-}
-
-function validateHistoryText(fieldName: string, value: unknown): void {
-  if (typeof value !== "string") {
-    throw new Error(`${fieldName} must be a string.`);
-  }
-  if (value.length > MAX_HISTORY_TEXT_CHARS) {
-    throw new Error(`${fieldName} must be ${MAX_HISTORY_TEXT_CHARS} characters or less.`);
   }
 }
 
@@ -626,12 +521,35 @@ function validateRequestedReasoningEffort(value: unknown): void {
   }
 }
 
+function validatePlayerRegistrationStatus(value: unknown): void {
+  if (value === undefined) {
+    return;
+  }
+  if (typeof value !== "string" || !isPlayerRegistrationStatus(value)) {
+    throw new Error(`playerRegistrationStatus must be one of: ${playerRegistrationStatuses.join(", ")}`);
+  }
+}
+
 function isSupportedModel(value: string): value is SupportedModel {
   return (supportedModels as readonly string[]).includes(value);
 }
 
 function isReasoningEffort(value: string): value is ReasoningEffort {
   return (reasoningEfforts as readonly string[]).includes(value);
+}
+
+function isPlayerRegistrationStatus(value: string): value is PlayerRegistrationStatus {
+  return (playerRegistrationStatuses as readonly string[]).includes(value);
+}
+
+function formatRegistrationStatus(status: PlayerRegistrationStatus): string {
+  if (status === "registered") {
+    return "registration complete";
+  }
+  if (status === "unregistered") {
+    return "not yet registered; first meld must be 30+ from own rack";
+  }
+  return "unknown; avoid redundant parallel advice unless the best move depends on it";
 }
 
 function reasoningPayload(effort: ReasoningEffort | undefined): { effort: ReasoningEffort } | undefined {

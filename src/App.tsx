@@ -5,14 +5,15 @@ import {
   RefreshCw,
   Send,
 } from "lucide-react";
-import { forwardRef, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fetchConfig, requestAdvice } from "./api";
 import { captureScreenFrame } from "./capture";
 import {
+  playerRegistrationStatuses,
   reasoningEfforts,
   supportedModels,
-  type AdviceHistoryEntry,
   type AdviceResponse,
+  type PlayerRegistrationStatus,
   type PublicConfig,
   type ReasoningEffort,
   type SupportedModel,
@@ -21,6 +22,12 @@ import {
 const rummikubGameUrl = "https://rummikub-apps.com/?cb=37";
 const defaultModel: SupportedModel = "gpt-5.5";
 const defaultReasoningEffort: ReasoningEffort = "medium";
+const registrationStorageKey = "rummikub.registrationStatus";
+const registrationStatusLabels: Record<PlayerRegistrationStatus, string> = {
+  unknown: "모름",
+  unregistered: "등록 전",
+  registered: "등록 완료",
+};
 
 const defaultAdvice: AdviceResponse = {
   recognizedState: {
@@ -41,16 +48,16 @@ const defaultAdvice: AdviceResponse = {
   model: "local",
 };
 
-const maxHistoryEntries = 6;
-
 export default function App() {
-  const gameFrameRef = useRef<HTMLIFrameElement>(null);
+  const gameCaptureRef = useRef<HTMLDivElement>(null);
   const [gameVersion, setGameVersion] = useState(0);
   const [advice, setAdvice] = useState<AdviceResponse>(defaultAdvice);
-  const [history, setHistory] = useState<AdviceHistoryEntry[]>([]);
   const [config, setConfig] = useState<PublicConfig | null>(null);
   const [selectedModel, setSelectedModel] = useState<SupportedModel>(defaultModel);
   const [selectedReasoningEffort, setSelectedReasoningEffort] = useState<ReasoningEffort>(defaultReasoningEffort);
+  const [playerRegistrationStatus, setPlayerRegistrationStatus] = useState<PlayerRegistrationStatus>(
+    getInitialRegistrationStatus,
+  );
   const [screenshot, setScreenshot] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -85,21 +92,17 @@ export default function App() {
 
     try {
       const capture = await captureScreenFrame({
-        element: gameFrameRef.current,
+        element: gameCaptureRef.current,
       });
 
       setScreenshot(capture.imageDataUrl);
       const nextAdvice = await requestAdvice({
         imageDataUrl: capture.imageDataUrl,
-        history,
         model: selectedModel,
         reasoningEffort: selectedReasoningEffort,
+        playerRegistrationStatus,
       });
       setAdvice(nextAdvice);
-      setHistory((currentHistory) => [
-        ...currentHistory,
-        toHistoryEntry(nextAdvice),
-      ].slice(-maxHistoryEntries));
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "조언 요청에 실패했습니다.");
     } finally {
@@ -153,6 +156,23 @@ export default function App() {
               </label>
             </div>
 
+            <div className="registration-control" aria-label="registration status">
+              <span>등록</span>
+              <div className="segmented-status">
+                {playerRegistrationStatuses.map((status) => (
+                  <button
+                    aria-pressed={playerRegistrationStatus === status}
+                    className={playerRegistrationStatus === status ? "is-selected" : undefined}
+                    key={status}
+                    onClick={() => updateRegistrationStatus(status, setPlayerRegistrationStatus)}
+                    type="button"
+                  >
+                    {registrationStatusLabels[status]}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <button className="primary-action" disabled={isLoading} onClick={handleAdviceRequest}>
               {isLoading ? <Loader2 className="spin" size={18} aria-hidden="true" /> : <Send size={18} aria-hidden="true" />}
               훈수 받기
@@ -164,7 +184,6 @@ export default function App() {
               aria-label="Reload Rummikub game"
               onClick={() => {
                 setGameVersion((currentVersion) => currentVersion + 1);
-                setHistory([]);
               }}
             >
               <RefreshCw size={16} aria-hidden="true" />
@@ -172,7 +191,9 @@ export default function App() {
           </div>
 
           <div className="game-surface">
-            <EmbeddedGame key={gameVersion} ref={gameFrameRef} url={rummikubGameUrl} />
+            <div className="game-capture-window" ref={gameCaptureRef}>
+              <EmbeddedGame key={gameVersion} url={rummikubGameUrl} />
+            </div>
           </div>
         </div>
 
@@ -217,13 +238,29 @@ export default function App() {
   );
 }
 
-function toHistoryEntry(advice: AdviceResponse): AdviceHistoryEntry {
-  return {
-    recognizedState: advice.recognizedState,
-    summary: advice.summary,
-    actions: advice.actions,
-    confidence: advice.confidence,
-  };
+function getInitialRegistrationStatus(): PlayerRegistrationStatus {
+  try {
+    const stored = window.localStorage.getItem(registrationStorageKey);
+    return isPlayerRegistrationStatus(stored) ? stored : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+function updateRegistrationStatus(
+  status: PlayerRegistrationStatus,
+  setStatus: (status: PlayerRegistrationStatus) => void,
+) {
+  setStatus(status);
+  try {
+    window.localStorage.setItem(registrationStorageKey, status);
+  } catch {
+    // localStorage is optional; the in-memory state still works for this session.
+  }
+}
+
+function isPlayerRegistrationStatus(value: unknown): value is PlayerRegistrationStatus {
+  return typeof value === "string" && (playerRegistrationStatuses as readonly string[]).includes(value);
 }
 
 function RecognizedStateView({ state }: { state: AdviceResponse["recognizedState"] }) {
@@ -257,7 +294,7 @@ function StateGroup({ label, items }: { label: string; items: string[] }) {
   );
 }
 
-const EmbeddedGame = forwardRef<HTMLIFrameElement, { url: string }>(function EmbeddedGame({ url }, ref) {
+function EmbeddedGame({ url }: { url: string }) {
   return (
     <iframe
       className="game-frame"
@@ -265,7 +302,6 @@ const EmbeddedGame = forwardRef<HTMLIFrameElement, { url: string }>(function Emb
       src={url}
       allow="fullscreen; autoplay; clipboard-read; clipboard-write; pointer-lock; gamepad; screen-wake-lock"
       allowFullScreen
-      ref={ref}
     />
   );
-});
+}
