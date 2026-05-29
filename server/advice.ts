@@ -22,6 +22,48 @@ const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_CHAT_MESSAGES = 24;
 const MAX_CONTEXT_TEXT_CHARS = 700;
 const MAX_THREAD_ID_CHARS = 120;
+const ADVICE_RESPONSE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["recognizedState", "summary", "actions", "watchouts", "confidence"],
+  properties: {
+    recognizedState: {
+      type: "object",
+      additionalProperties: false,
+      required: ["board", "rack", "uncertainty"],
+      properties: {
+        board: { type: "array", items: { type: "string" } },
+        rack: { type: "array", items: { type: "string" } },
+        uncertainty: { type: "array", items: { type: "string" } },
+      },
+    },
+    summary: { type: "string" },
+    actions: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["label", "reason"],
+        properties: {
+          label: { type: "string" },
+          reason: { type: "string" },
+        },
+      },
+    },
+    watchouts: { type: "array", items: { type: "string" } },
+    confidence: { type: "string", enum: ["low", "medium", "high"] },
+  },
+} as const;
+
+const ADVICE_RESPONSE_TEXT_CONFIG = {
+  format: {
+    type: "json_schema",
+    name: "rummikub_advice",
+    strict: true,
+    schema: ADVICE_RESPONSE_SCHEMA,
+  },
+  verbosity: "low",
+} as const;
 
 type ResponsesContent =
   | { type: "input_text"; text: string }
@@ -118,7 +160,7 @@ export async function generateAdvice(request: AdviceRequest): Promise<AdviceResp
       model: config.model,
       input: buildAdviceResponsesInput(prompt, request.imageDataUrl),
       reasoning: reasoningPayload(config.reasoningEffort),
-      max_output_tokens: 700,
+      text: ADVICE_RESPONSE_TEXT_CONFIG,
     });
 
     const outputText = extractResponseText(response);
@@ -151,7 +193,6 @@ export async function generateAdvice(request: AdviceRequest): Promise<AdviceResp
             ],
           },
         ],
-        max_tokens: 700,
         reasoning_effort: chatReasoningEffort(config.reasoningEffort),
         temperature: 0.2,
       });
@@ -183,7 +224,7 @@ export async function generateChatReply(request: ChatRequest): Promise<ChatRespo
   const input = buildChatResponsesInput(prompt, request);
 
   if (config.useStreamingResponses) {
-    const outputText = await createStreamingTextResponse(config, input, 650);
+    const outputText = await createStreamingTextResponse(config, input);
     return toChatResponse(outputText, "responses", config.model);
   }
 
@@ -197,7 +238,6 @@ export async function generateChatReply(request: ChatRequest): Promise<ChatRespo
       model: config.model,
       input,
       reasoning: reasoningPayload(config.reasoningEffort),
-      max_output_tokens: 650,
     });
 
     const outputText = extractResponseText(response);
@@ -211,7 +251,6 @@ export async function generateChatReply(request: ChatRequest): Promise<ChatRespo
       const chat = await client.chat.completions.create({
         model: config.model,
         messages: buildChatCompletionsInput(prompt, request),
-        max_tokens: 650,
         reasoning_effort: chatReasoningEffort(config.reasoningEffort),
         temperature: 0.2,
       });
@@ -343,29 +382,16 @@ export function buildChatPrompt(request: ChatRequest): string {
 }
 
 export function parseAdviceText(text: string): Omit<AdviceResponse, "provider" | "model" | "rawText"> {
-  const cleaned = stripJsonFence(text.trim());
-
-  try {
-    const parsed = JSON.parse(cleaned) as Partial<AdviceResponse>;
-    return normalizeAdvice(parsed, text);
-  } catch {
-    return {
-      recognizedState: {
-        board: [],
-        rack: [],
-        uncertainty: ["모델 응답이 JSON이 아니어서 인식 상태를 구조화하지 못했습니다."],
-      },
-      summary: text.trim() || "현재 화면에서 확실한 조합을 읽지 못했습니다.",
-      actions: [
-        {
-          label: "보드 재확인",
-          reason: "모델 응답이 JSON이 아니어서 원문 조언만 표시합니다.",
-        },
-      ],
-      watchouts: ["말풍선의 원문을 확인하고, 불확실하면 타일을 뽑는 선택도 고려하세요."],
-      confidence: "low",
-    };
+  for (const candidate of jsonParseCandidates(text)) {
+    try {
+      const parsed = JSON.parse(candidate) as Partial<AdviceResponse>;
+      return normalizeAdvice(parsed, text);
+    } catch {
+      continue;
+    }
   }
+
+  return createUnstructuredAdviceFallback();
 }
 
 function normalizeAdvice(
@@ -522,18 +548,94 @@ function stripJsonFence(text: string): string {
     .trim();
 }
 
+function jsonParseCandidates(text: string): string[] {
+  const trimmed = text.trim();
+  const candidates = new Set<string>();
+  if (trimmed) {
+    candidates.add(stripJsonFence(trimmed));
+  }
+
+  const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(trimmed);
+  if (fenced?.[1]?.trim()) {
+    candidates.add(fenced[1].trim());
+  }
+
+  const embedded = extractFirstBalancedJsonObject(trimmed);
+  if (embedded) {
+    candidates.add(embedded);
+  }
+
+  return [...candidates].filter(Boolean);
+}
+
+function extractFirstBalancedJsonObject(text: string): string | null {
+  const start = text.indexOf("{");
+  if (start < 0) {
+    return null;
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === "\"") {
+      inString = true;
+    } else if (char === "{") {
+      depth += 1;
+    } else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return text.slice(start, index + 1);
+      }
+    }
+  }
+
+  return null;
+}
+
+function createUnstructuredAdviceFallback(): Omit<AdviceResponse, "provider" | "model" | "rawText"> {
+  return {
+    recognizedState: {
+      board: [],
+      rack: [],
+      uncertainty: ["응답 형식이 깨져서 보드와 랙 판독을 구조화하지 못했습니다."],
+    },
+    summary: "응답 형식을 읽지 못했습니다. 다시 훈수 받기를 눌러 현재 화면을 재분석해 주세요.",
+    actions: [
+      {
+        label: "다시 분석",
+        reason: "부분 JSON이나 원문 조언을 그대로 표시하지 않고 새 캡처로 재요청하는 편이 안전합니다.",
+      },
+    ],
+    watchouts: ["같은 문제가 반복되면 reasoning effort를 낮추거나 모델을 gpt-5.4로 바꿔 다시 시도하세요."],
+    confidence: "low",
+  };
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
 async function createStreamingResponse(config: RuntimeConfig, prompt: string, imageDataUrl: string): Promise<string> {
-  return createStreamingTextResponse(config, buildAdviceResponsesInput(prompt, imageDataUrl), 700);
+  return createStreamingTextResponse(config, buildAdviceResponsesInput(prompt, imageDataUrl));
 }
 
 async function createStreamingTextResponse(
   config: RuntimeConfig,
   input: ResponsesMessage[],
-  maxOutputTokens: number,
 ): Promise<string> {
   const response = await fetch(`${config.baseURL.replace(/\/+$/, "")}/responses`, {
     method: "POST",
@@ -547,7 +649,6 @@ async function createStreamingTextResponse(
       stream: true,
       input,
       reasoning: reasoningPayload(config.reasoningEffort),
-      max_output_tokens: maxOutputTokens,
     }),
   });
 

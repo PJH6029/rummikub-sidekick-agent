@@ -122,6 +122,25 @@ describe("advice service", () => {
     expect(parsed.confidence).toBe("high");
   });
 
+  it("parses an embedded JSON object without leaking wrapper text", () => {
+    const parsed = parseAdviceText(`Here is the result:
+{"recognizedState":{"board":["파랑 5-6-7"],"rack":["빨강4"],"uncertainty":[]},"summary":"빨강4는 보드에 바로 붙이지 마세요.","actions":[{"label":"드로우","reason":"확실한 합법 수가 없습니다."}],"watchouts":["등록 전이면 30점 필요"],"confidence":"medium"}
+Done.`);
+
+    expect(parsed.recognizedState.board).toEqual(["파랑 5-6-7"]);
+    expect(parsed.summary).toBe("빨강4는 보드에 바로 붙이지 마세요.");
+    expect(parsed.actions[0]?.label).toBe("드로우");
+  });
+
+  it("does not show partial JSON as user advice when parsing fails", () => {
+    const parsed = parseAdviceText('{"recognizedState":{"board":["파랑 5-6-7"],"rack":[');
+
+    expect(parsed.summary).not.toContain("recognizedState");
+    expect(parsed.summary).toContain("응답 형식");
+    expect(parsed.actions[0]?.label).toBe("다시 분석");
+    expect(parsed.recognizedState.uncertainty[0]).toContain("응답 형식");
+  });
+
   it("extracts text from streaming Responses events", () => {
     const text = extractTextFromResponsesSse(`event: response.output_text.delta
 data: {"type":"response.output_text.delta","delta":"oauth"}

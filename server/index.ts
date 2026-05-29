@@ -2,6 +2,7 @@ import express from "express";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import "./env.js";
 import { generateAdvice, generateChatReply, getPublicConfig } from "./advice.js";
 import { createRateLimit, createTrustedOriginMiddleware } from "./security.js";
 import type { AdviceRequest, ChatRequest } from "../shared/types.js";
